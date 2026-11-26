@@ -105,3 +105,50 @@ test('Report lists remaining issues and human checks', async () => {
 test('Unsupported formats give a clear message', () => {
   assert.throws(() => engine.detectFormat('old.doc'), /Save it as .docx/);
 });
+
+// ---------------------------------------------------------------------------
+// Offline suggestions and "Fix all, including suggested text"
+const D = require('../src/core/describe');
+
+test('Chart alt text is written from the chart data', () => {
+  const xml = `<?xml version="1.0"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Visitors by month</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:lineChart><c:ser><c:tx><c:v>Visitors</c:v></c:tx><c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Jan</c:v></c:pt><c:pt idx="1"><c:v>Feb</c:v></c:pt><c:pt idx="2"><c:v>Mar</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>100</c:v></c:pt><c:pt idx="1"><c:v>250</c:v></c:pt><c:pt idx="2"><c:v>400</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>`;
+  const d = D.describeChart(xml);
+  assert.match(d, /^Line chart: Visitors by month\./);
+  assert.match(d, /Jan 100, Feb 250, Mar 400/);
+  assert.match(d, /rises from 100 to 400/);
+  assert.equal(D.describeChart('<not-a-chart/>'), '');
+});
+
+test('Captions are recognised and the label removed', () => {
+  assert.equal(D.captionText('Figure 3: Map of our offices'), 'Map of our offices');
+  assert.equal(D.captionText('Photo – Students in class'), 'Students in class');
+  assert.equal(D.captionText('Figures show growth'), '');
+  assert.equal(D.findCaption(['', 'Normal text', 'Chart 1. Sales by year']), 'Sales by year');
+});
+
+test('Fix all with suggested text fills in captions, chart data, links and titles, and marks them for review', async () => {
+  for (const f of ['sample-inaccessible.docx', 'sample-inaccessible.pptx']) {
+    const buf = fx(f);
+    const plain = await engine.fixAllAuto(buf, f);
+    assert.ok(plain.applied.every((a) => !a.suggested), 'plain Fix all must not apply suggested text');
+    const r = await engine.fixAllAuto(buf, f, {}, null, { includeSuggestions: true, suggestions: {} });
+    const sugg = r.applied.filter((a) => a.suggested);
+    assert.ok(sugg.length >= 2, `${f}: expected suggested fixes`);
+    assert.ok(sugg.every((a) => a.source && a.detail), 'each suggested fix records its source and text');
+    assert.ok(!r.result.issues.some((i) => i.rule === 'link-text'), `${f}: link text fixed`);
+  }
+  // pptx: the native chart gets alt text from its data
+  const pp = await engine.fixAllAuto(fx('sample-inaccessible.pptx'), 'sample-inaccessible.pptx', {}, null, { includeSuggestions: true });
+  assert.ok(pp.applied.some((a) => a.source === 'chart data' && /Column chart: Pass rate by region/.test(a.detail)));
+});
+
+test('AI suggestions passed to Fix all are used for pictures without captions', async () => {
+  const f = 'sample-inaccessible.pptx';
+  const buf = fx(f);
+  const before = await engine.audit(buf, f);
+  const pic = before.issues.find((i) => /^img-alt/.test(i.rule) && i.fix.kind === 'ai' && !i.fix.suggestion);
+  assert.ok(pic, 'fixture has a picture with no offline suggestion');
+  const r = await engine.fixAllAuto(buf, f, {}, null, { includeSuggestions: true, suggestions: { [pic.id]: { text: 'Bar chart of students per region', source: 'Test model suggestion' } } });
+  assert.ok(r.applied.some((a) => a.source === 'Test model suggestion'));
+  assert.equal(r.result.summary.errors, 0);
+});

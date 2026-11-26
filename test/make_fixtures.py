@@ -41,6 +41,7 @@ def make_docx():
     d.add_heading('Regional results', 3)  # skipped level
     d.add_paragraph('Results improved in every region compared with last year.')
     d.add_picture(io.BytesIO(chart_png()))
+    d.add_paragraph('Figure 1: Students per region in 2026, with Asia the highest')
     p = d.add_paragraph()
     r = p.add_run('Key findings')
     r.bold = True
@@ -90,10 +91,18 @@ def make_pptx():
     box = s4.shapes.add_textbox(Inches(1), Inches(2), Inches(8), Inches(1))
     run = box.text_frame.paragraphs[0].add_run(); run.text = 'https://example.org/programme'
     run.hyperlink.address = 'https://example.org/programme'
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE
+    s5 = prs.slides.add_slide(prs.slide_layouts[5])
+    s5.shapes.title.text = 'Pass rates'
+    cd = CategoryChartData(); cd.categories = ['Europe', 'Asia', 'Africa', 'Americas']
+    cd.add_series('Pass rate (%)', (92, 88, 85, 90))
+    ch = s5.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(2), Inches(6), Inches(4), cd).chart
+    ch.has_title = True; ch.chart_title.text_frame.text = 'Pass rate by region, 2026'
     prs.core_properties.title = ''
     path = os.path.join(HERE, 'sample-inaccessible.pptx'); prs.save(path)
     strip_part(path, 'ppt/presentation.xml', lambda s: re.sub(r' lang="[^"]*"', '', s))
-    for n in ['ppt/slides/slide1.xml', 'ppt/slides/slide2.xml', 'ppt/slides/slide3.xml', 'ppt/slides/slide4.xml']:
+    for n in ['ppt/slides/slide1.xml', 'ppt/slides/slide2.xml', 'ppt/slides/slide3.xml', 'ppt/slides/slide4.xml', 'ppt/slides/slide5.xml']:
         strip_part(path, n, lambda s: re.sub(r' lang="[^"]*"', '', s))
 
 def make_pdf():

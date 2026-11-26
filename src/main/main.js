@@ -25,6 +25,9 @@ function createWindow() {
   win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('file://')) { e.preventDefault(); if (/^https:\/\//.test(url)) shell.openExternal(url); } });
 }
 
+// Tests run with their own settings folder so they never touch real settings.
+if (process.env.ADC_USER_DATA) app.setPath('userData', process.env.ADC_USER_DATA);
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(buildMenu());
   createWindow();
@@ -113,21 +116,43 @@ ipcMain.handle('doc:fix', wrap(async (id, issueId, input = {}) => {
   doc.working = next;
   doc.dirty = true;
   const detail = input.decorative ? 'marked as decorative' : input.value ? `“${String(input.value).slice(0, 120)}”` : issue.fix.suggestion && issue.fix.kind === 'auto' ? `set to “${issue.fix.suggestion}”` : '';
-  doc.applied.push({ title: issue.title, detail, location: issue.location.label, wcag: issue.wcag.map((c) => c.id), by: input.fromAI ? 'Claude suggestion, approved by you' : BY[issue.fix.kind] || 'Fix', at: new Date().toISOString() });
+  doc.applied.push({ title: issue.title, detail, location: issue.location.label, wcag: issue.wcag.map((c) => c.id), by: input.fromAI ? `${typeof input.fromAI === 'string' ? input.fromAI : 'AI'} suggestion, approved by you` : input.fromOffline ? 'Suggested text, approved by you' : BY[issue.fix.kind] || 'Fix', at: new Date().toISOString() });
   doc.result = await engine.audit(doc.working, doc.name, opts());
   return view(doc);
 }));
-ipcMain.handle('doc:fixAll', wrap(async (id) => {
+ipcMain.handle('doc:fixAll', wrap(async (id, mode = {}) => {
   const doc = getDoc(id);
-  const r = await engine.fixAllAuto(doc.working, doc.name, opts(), (n, issue) => win && win.webContents.send('progress', { id, n, title: issue.title }));
+  const progress = (n, title) => win && win.webContents.send('progress', { id, n, title });
+  const suggestions = {};
+  const aiErrors = [];
+  if (mode.includeSuggestions && mode.useAI) {
+    // Ask the chosen AI provider for alt text that has no offline suggestion (images without captions).
+    const cfg = settings.aiConfig();
+    if (cfg.provider !== 'off') {
+      const wanted = doc.result.issues.filter((i) => i.fix.kind === 'ai' && /^img-alt/.test(i.rule) && !(i.fix.suggestion || '').trim());
+      let k = 0;
+      for (const issue of wanted) {
+        progress(++k, `Getting a suggestion (${k} of ${wanted.length}): ${issue.title}`);
+        try {
+          const r = await suggestFor(doc, issue, cfg);
+          suggestions[issue.id] = { ...r, source: `${providerLabel(cfg)} suggestion` };
+        } catch (e) { aiErrors.push({ id: issue.id, title: issue.title, message: e.message }); if (/Could not reach|rejected|turned off|not installed|not running/.test(e.message)) break; }
+      }
+    }
+  }
+  const r = await engine.fixAllAuto(doc.working, doc.name, opts(), (n, issue) => progress(n, issue.title), { includeSuggestions: !!mode.includeSuggestions, suggestions });
   if (r.applied.length) {
     doc.history.push({ buffer: doc.working, appliedLen: doc.applied.length });
     doc.working = r.buffer;
     doc.dirty = true;
-    for (const a of r.applied) doc.applied.push({ title: a.title, by: 'Automatic fix (Fix all)', at: new Date().toISOString() });
+    for (const a of r.applied) {
+      doc.applied.push(a.suggested
+        ? { title: a.title, detail: a.detail, location: a.location, by: `Fix all with suggested text (from ${a.source}). Please review`, suggested: true, at: new Date().toISOString() }
+        : { title: a.title, by: 'Automatic fix (Fix all)', at: new Date().toISOString() });
+    }
   }
   doc.result = r.result;
-  return { doc: view(doc), applied: r.applied.length, errors: r.errors };
+  return { doc: view(doc), applied: r.applied.length, suggested: r.applied.filter((a) => a.suggested).length, errors: [...aiErrors, ...r.errors] };
 }));
 ipcMain.handle('doc:undo', wrap(async (id) => {
   const doc = getDoc(id);
@@ -155,21 +180,41 @@ ipcMain.handle('doc:preview', wrap(async (id, issueId) => {
   return ni.isEmpty() ? null : ni.resize({ width: 480 }).toDataURL();
 }));
 
-ipcMain.handle('ai:suggest', wrap(async (id, issueId) => {
-  const doc = getDoc(id);
-  const issue = getIssue(doc, issueId);
-  const s = settings.get();
-  if (!s.aiEnabled) throw new Error('AI suggestions are turned off in Settings.');
-  const apiKey = settings.getApiKey();
-  const language = doc.result.meta.language || s.defaultLanguage;
+// Hidden window that turns a PDF page into a PNG for local vision models.
+let pdfWin = null;
+async function renderPdf(pdfBuffer) {
+  if (!pdfWin || pdfWin.isDestroyed()) {
+    pdfWin = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: false, nodeIntegration: false, offscreen: false } });
+    await pdfWin.loadFile(path.join(__dirname, 'pdf-render.html'));
+    for (let i = 0; i < 100 && !(await pdfWin.webContents.executeJavaScript('!!window.rendererReady')); i++) await new Promise((r) => setTimeout(r, 50));
+  }
+  const b64 = await pdfWin.webContents.executeJavaScript(`window.renderPdfPage(${JSON.stringify(pdfBuffer.toString('base64'))})`);
+  return Buffer.from(b64, 'base64');
+}
+
+if (process.env.ADC_USER_DATA) global.__adcRenderPdf = renderPdf; // end-to-end test hook
+
+const providerLabel = (cfg) => (ai.PROVIDERS[cfg.provider] || {}).name || 'AI';
+
+async function suggestFor(doc, issue, cfg) {
+  const language = doc.result.meta.language || settings.get().defaultLanguage;
   if (/^img-alt/.test(issue.rule)) {
     const image = await engine.getImage(doc.working, doc.name, issue.target);
     if (!image) throw new Error('The image could not be read for a suggestion. Please type the alt text yourself.');
-    return ai.suggestAltText({ apiKey, model: s.model, image, context: issue.target.context, language, figureHint: doc.format === 'pdf' ? 'the figure (if there are several, the most prominent one without a caption)' : null });
+    return ai.suggestAltText({ cfg, image, context: issue.target.context, language, renderPdf, figureHint: doc.format === 'pdf' ? 'the figure (if there are several, the most prominent one without a caption)' : null });
   }
-  if (issue.rule === 'slide-title') return ai.suggestText({ apiKey, model: s.model, kind: 'slide-title', context: issue.target.context, language });
-  if (issue.rule === 'link-text') return ai.suggestText({ apiKey, model: s.model, kind: 'link', current: issue.target.current, url: issue.target.url, context: issue.target.context, language });
+  if (issue.rule === 'slide-title') return ai.suggestText({ cfg, kind: 'slide-title', context: issue.target.context, language });
+  if (issue.rule === 'link-text') return ai.suggestText({ cfg, kind: 'link', current: issue.target.current, url: issue.target.url, context: issue.target.context, language });
   throw new Error('No suggestion is available for this issue.');
+}
+
+ipcMain.handle('ai:suggest', wrap(async (id, issueId) => {
+  const doc = getDoc(id);
+  const issue = getIssue(doc, issueId);
+  const cfg = settings.aiConfig();
+  if (cfg.provider === 'off') throw new Error('AI suggestions are turned off in Settings.');
+  const r = await suggestFor(doc, issue, cfg);
+  return { ...r, provider: providerLabel(cfg) };
 }));
 
 function uniquePath(p) {
@@ -230,8 +275,11 @@ ipcMain.handle('report:export', wrap(async (id, kind) => {
 
 ipcMain.handle('settings:get', wrap(async () => settings.get()));
 ipcMain.handle('settings:set', wrap(async (patch) => settings.set(patch)));
-ipcMain.handle('settings:setKey', wrap(async (key) => settings.setApiKey((key || '').trim())));
-ipcMain.handle('settings:testKey', wrap(async (key) => ai.testKey((key || '').trim() || settings.getApiKey(), settings.get().model)));
+ipcMain.handle('settings:setKey', wrap(async (key, provider) => settings.setApiKey((key || '').trim(), provider || 'anthropic')));
+ipcMain.handle('settings:testKey', wrap(async (patch = {}) => {
+  const { apiKey, ...rest } = patch || {};
+  return ai.testConnection(settings.aiConfig({ ...rest, ...(apiKey && apiKey.trim() ? { apiKey: apiKey.trim() } : {}) }));
+}));
 ipcMain.handle('settings:pickFolder', wrap(async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Choose where to save accessible copies', properties: ['openDirectory', 'createDirectory'] });
   return r.canceled ? null : r.filePaths[0];

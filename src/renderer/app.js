@@ -17,6 +17,11 @@ const state = {
 
 // ---------------------------------------------------------------------------
 // Helpers
+const PROVIDER_NAME = { anthropic: 'Claude', openai: 'OpenAI', ollama: 'the local model', off: '' };
+function aiName() { const p = state.settings ? state.settings.provider : 'anthropic'; return PROVIDER_NAME[p] || 'AI'; }
+function aiOn() { return !state.settings || state.settings.provider !== 'off'; }
+/** Items "Fix all including suggested text" can fill in without asking an AI. */
+function offlineSuggestible(i) { return ['ai', 'input'].includes(i.fix.kind) && i.fix.inFixAll !== false && i.fix.inputType !== 'level' && !!(i.fix.suggestion || '').trim(); }
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
   if (attrs) for (const [k, v] of Object.entries(attrs)) {
@@ -73,7 +78,7 @@ function toast(msg, isError) {
   toast._t = setTimeout(() => { t.hidden = true; }, isError ? 9000 : 5000);
 }
 const FORMAT_NAME = { docx: 'Word document', pptx: 'PowerPoint presentation', pdf: 'PDF' };
-const FIX_KIND = { auto: 'Automatic fix', ai: 'Needs text: Claude can suggest', input: 'Needs your input', manual: 'Manual check or fix' };
+const FIX_KIND = { auto: 'Automatic fix', ai: 'Needs text: a suggestion is available', input: 'Needs your input', manual: 'Manual check or fix' };
 function currentDoc() { return state.docs.find((d) => d.id === state.currentId) || null; }
 function draft(docId, issueId) {
   state.drafts[docId] = state.drafts[docId] || {};
@@ -146,7 +151,7 @@ function renderDashboard() {
       h('ol', { class: 'steps' },
         h('li', null, h('strong', null, 'Add documents'), h('br'), 'Use “Add documents” or drag files onto the window.'),
         h('li', null, h('strong', null, 'Review the issues'), h('br'), 'Each issue shows where it is and which WCAG criterion it relates to.'),
-        h('li', null, h('strong', null, 'Fix'), h('br'), 'Fix issues one by one, or use “Fix all automatic”. Alt text can be suggested by Claude for you to approve.'),
+        h('li', null, h('strong', null, 'Fix'), h('br'), 'Fix issues one by one, or use “Fix all”. Alt text, link text and slide titles can be suggested offline or by an AI model you choose, for you to review.'),
         h('li', null, h('strong', null, 'Save and verify'), h('br'), 'Saving writes an accessible copy and checks it again. Export a report for your records.')),
       h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-primary', onclick: addFiles }, svg('M12 5v14M5 12h14'), 'Add documents'),
         h('button', { type: 'button', class: 'btn', onclick: () => { state.view = 'help'; state.pendingFocus = 'help-heading'; render(); } }, 'What the checks cover'))));
@@ -182,10 +187,14 @@ function renderDashboard() {
   const autoCount = s.auto;
   const aiIssues = doc.result.issues.filter((i) => i.fix.kind === 'ai');
   const isBusy = !!state.busy;
+  const offlineCount = doc.result.issues.filter(offlineSuggestible).length;
+  const aiAltCount = aiOn() ? doc.result.issues.filter((i) => i.fix.kind === 'ai' && /^img-alt/.test(i.rule) && !(i.fix.suggestion || '').trim()).length : 0;
+  const allCount = autoCount + offlineCount + aiAltCount;
   children.push(h('div', { class: 'toolbar', role: 'toolbar', 'aria-label': 'Document actions' },
     h('div', { class: 'btn-row' },
       h('button', { type: 'button', class: 'btn btn-primary', disabled: isBusy || !autoCount, onclick: () => fixAll(doc) }, svg(ICON.wand), `Fix all automatic (${autoCount})`),
-      h('button', { type: 'button', class: 'btn', disabled: isBusy || !aiIssues.length, onclick: () => suggestAll(doc), title: 'Uses your Claude API key. You review every suggestion before it is applied.' }, svg(ICON.sparkle), `Suggest text with Claude (${aiIssues.length})`),
+      h('button', { type: 'button', class: 'btn', disabled: isBusy || !allCount, 'aria-describedby': 'fixall-hint', onclick: () => fixAll(doc, true) }, svg(ICON.wand), `Fix all, including suggested text (${allCount})`),
+      aiOn() ? h('button', { type: 'button', class: 'btn', disabled: isBusy || !aiIssues.length, onclick: () => suggestAll(doc) }, svg(ICON.sparkle), `Suggest text with ${aiName()} (${aiIssues.length})`) : null,
       h('button', { type: 'button', class: 'btn', disabled: isBusy, onclick: () => recheck(doc) }, svg(ICON.refresh), 'Re-check'),
       h('button', { type: 'button', class: 'btn', disabled: isBusy || !doc.canUndo, onclick: () => undo(doc) }, svg(ICON.undo), 'Undo last fix')),
     h('div', { class: 'btn-row' },
@@ -193,6 +202,16 @@ function renderDashboard() {
       h('label', { class: 'sr-only', for: 'export-kind' }, 'Report format'),
       h('select', { id: 'export-kind', class: 'btn-small', style: null }, h('option', { value: 'pdf' }, 'PDF report'), h('option', { value: 'html' }, 'HTML report'), h('option', { value: 'json' }, 'JSON data')),
       h('button', { type: 'button', class: 'btn', disabled: isBusy, onclick: () => exportReport(doc, document.getElementById('export-kind').value) }, svg(ICON.report), 'Export report'))));
+  children.push(h('p', { class: 'muted small', id: 'fixall-hint' }, aiOn()
+    ? `“Fix all, including suggested text” also fills in captions, chart data, link addresses and slide titles, and asks ${aiName()} for alt text where there is no caption. Every filled-in item is listed for you to review.`
+    : '“Fix all, including suggested text” also fills in captions, chart data, link addresses and slide titles, without any AI. Every filled-in item is listed for you to review.'));
+  const toReview = (doc.applied || []).filter((a) => a.suggested);
+  if (toReview.length) {
+    children.push(h('section', { class: 'panel review-panel', 'aria-labelledby': 'review-h' },
+      h('h2', { id: 'review-h' }, `Suggested text to review (${toReview.length})`),
+      h('p', null, 'These were filled in by “Fix all” from suggested text. Check each one is accurate. To change one, select Undo last fix, or edit it in the saved copy.'),
+      h('ul', { class: 'review-list' }, toReview.map((a) => h('li', null, h('strong', null, a.title), a.location ? ` (${a.location})` : '', h('br'), a.detail || '', h('br'), h('span', { class: 'muted small' }, a.by))))));
+  }
   if (state.busy) children.push(h('p', { class: 'muted', role: 'status' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), ' ', state.busy.label, '…'));
 
   // Filters
@@ -274,7 +293,11 @@ function renderFix(doc, issue, d, err) {
     control = f.multiline ? h('textarea', { ...attrs, rows: '3' }, val) : h('input', { ...attrs, type: 'text', value: val });
   }
   if (control) {
-    const hint = f.kind === 'ai' ? (d.fromAI ? 'Suggested by Claude. Check it is accurate and edit if needed before applying.' : 'Type the text, or ask Claude for a suggestion to review.') : f.kind === 'auto' ? 'You can change this before fixing.' : f.suggestion ? 'A suggestion is filled in. Edit it if needed.' : '';
+    const offline = f.suggestion && f.suggestionSource && d.value === undefined;
+    const hint = d.fromAI ? `Suggested by ${typeof d.fromAI === 'string' ? d.fromAI : aiName()}. Check it is accurate and edit if needed before applying.`
+      : offline ? `Suggested from the ${f.suggestionSource} (no AI used). Check it and edit if needed before applying.`
+      : f.kind === 'ai' ? (aiOn() ? `Type the text, or ask ${aiName()} for a suggestion to review.` : 'Type the text.')
+      : f.kind === 'auto' ? 'You can change this before fixing.' : f.suggestion ? 'A suggestion is filled in. Edit it if needed.' : '';
     box.append(h('div', { class: 'field' }, h('label', { for: inputId }, f.inputLabel || 'Value'), h('span', { class: 'hint', id: `hint-${issue.id}` }, hint), control));
   }
   if (f.allowDecorative) {
@@ -285,7 +308,7 @@ function renderFix(doc, issue, d, err) {
   }
   const row = h('div', { class: 'btn-row' });
   row.append(h('button', { type: 'button', class: 'btn btn-primary btn-small', disabled: !!state.busy, onclick: () => applyFix(doc, issue) }, svg(ICON.check), f.kind === 'auto' ? f.label || 'Fix' : `Apply${f.label ? ': ' + f.label.toLowerCase() : ''}`));
-  if (f.kind === 'ai') row.append(h('button', { type: 'button', class: 'btn btn-small', disabled: !!state.busy, onclick: () => suggestOne(doc, issue) }, svg(ICON.sparkle), d.fromAI ? 'Suggest again' : 'Suggest with Claude'));
+  if (f.kind === 'ai' && aiOn()) row.append(h('button', { type: 'button', class: 'btn btn-small', disabled: !!state.busy, onclick: () => suggestOne(doc, issue) }, svg(ICON.sparkle), d.fromAI ? 'Suggest again' : `Suggest with ${aiName()}`));
   box.append(row);
   return box;
 }
@@ -332,27 +355,76 @@ async function renderSettings() {
   const root = document.getElementById('view-settings');
   if (!state.settings) state.settings = await api.getSettings();
   const s = state.settings;
-  const keyStatus = h('p', { id: 'key-status', class: 'status-line', role: 'status' }, s.hasApiKey ? 'An API key is saved on this computer.' : 'No API key saved yet.');
+  const prov = s.provider || 'anthropic';
+  const save = async (patch, msg) => { state.settings = await api.setSettings(patch); if (msg) announce(msg); };
+  const test = async () => {
+    const el = document.getElementById('key-status');
+    el.className = 'status-line'; el.textContent = 'Testing…';
+    const keyEl = document.getElementById('api-key');
+    const r = await api.testConnection({ apiKey: keyEl ? keyEl.value : '' }).catch((e) => ({ ok: false, message: e.message }));
+    el.className = 'status-line ' + (r.ok ? 'ok' : 'bad'); el.textContent = r.ok ? `Connected. Using ${r.model}.` : r.message;
+  };
+  const radio = (value, label, hint) => h('div', { class: 'check radio' },
+    h('input', { type: 'radio', name: 'provider', id: `prov-${value}`, value, checked: prov === value, 'aria-describedby': `prov-${value}-hint`, onchange: async () => { await save({ provider: value }, `${label} selected`); state.pendingFocus = `prov-${value}`; renderSettings(); } }),
+    h('label', { for: `prov-${value}` }, label, h('span', { class: 'hint', id: `prov-${value}-hint` }, hint)));
+
+  const keyBlock = (provider, label, hintText, placeholder, hasKey) => [
+    h('div', { class: 'field' },
+      h('label', { for: 'api-key' }, label),
+      h('span', { class: 'hint', id: 'api-key-hint' }, `${hintText} It is stored ${s.keyStorage === 'encrypted' ? 'encrypted with your system keychain' : 'in your user settings folder (no system keychain was found)'} and only sent to that company.`),
+      h('input', { type: 'password', id: 'api-key', autocomplete: 'off', spellcheck: 'false', placeholder: hasKey ? '•••••••• (saved, type to replace)' : placeholder, 'aria-describedby': 'api-key-hint key-status' })),
+    h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn btn-primary', onclick: async () => { const v = document.getElementById('api-key').value; if (!v.trim()) { toast('Type a key first.', true); return; } state.settings = await api.setApiKey(v, provider); document.getElementById('api-key').value = ''; renderSettings(); toast('API key saved.'); } }, 'Save key'),
+      h('button', { type: 'button', class: 'btn', onclick: test }, 'Test connection'),
+      hasKey ? h('button', { type: 'button', class: 'btn btn-quiet', onclick: async () => { state.settings = await api.setApiKey('', provider); renderSettings(); toast('API key removed.'); } }, 'Remove key') : null),
+    h('p', { id: 'key-status', class: 'status-line', role: 'status' }, hasKey ? 'An API key is saved on this computer.' : 'No API key saved yet.'),
+  ];
+
+  let details = [];
+  if (prov === 'anthropic') {
+    details = [...keyBlock('anthropic', 'Claude API key', 'Create a key at console.anthropic.com.', 'sk-ant-…', s.hasApiKey),
+      h('div', { class: 'field' },
+        h('label', { for: 'model' }, 'Claude model'),
+        h('select', { id: 'model', onchange: (e) => save({ model: e.target.value }, 'Model saved') },
+          [['claude-opus-5-5', 'Claude Opus 5.5 (best quality, default)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 (faster, lower cost)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (fastest, lowest cost)']].map(([v, l]) => h('option', { value: v, selected: s.model === v }, l))))];
+  } else if (prov === 'openai') {
+    details = [...keyBlock('openai', 'OpenAI API key', 'Create a key at platform.openai.com.', 'sk-…', s.hasOpenaiKey),
+      h('div', { class: 'field' },
+        h('label', { for: 'openai-model' }, 'OpenAI model'),
+        h('span', { class: 'hint', id: 'openai-model-hint' }, 'Any OpenAI model that accepts images, for example gpt-5 or gpt-5-mini.'),
+        h('input', { type: 'text', id: 'openai-model', value: s.openaiModel, spellcheck: 'false', 'aria-describedby': 'openai-model-hint', onchange: (e) => save({ openaiModel: e.target.value.trim() || 'gpt-5' }, 'Model saved') }))];
+  } else if (prov === 'ollama') {
+    details = [
+      h('div', { class: 'note' },
+        h('p', null, h('strong', null, 'Set up once: '), 'install Ollama from ollama.com, open it, then download a vision model by running this in a terminal (about 3 GB):'),
+        h('p', null, h('code', null, `ollama pull ${s.ollamaModel || 'gemma3'}`)),
+        h('p', { class: 'muted small' }, 'Other vision models that work: qwen2.5vl, llama3.2-vision, granite3.2-vision. Bigger models describe images better but are slower. Suggestions take a few seconds to a minute depending on your computer.')),
+      h('div', { class: 'field' },
+        h('label', { for: 'ollama-model' }, 'Local model name'),
+        h('input', { type: 'text', id: 'ollama-model', value: s.ollamaModel, spellcheck: 'false', onchange: async (e) => { await save({ ollamaModel: e.target.value.trim() || 'gemma3' }, 'Model saved'); } })),
+      h('div', { class: 'field' },
+        h('label', { for: 'ollama-url' }, 'Ollama address'),
+        h('span', { class: 'hint', id: 'ollama-url-hint' }, 'Leave as http://localhost:11434 unless you run Ollama somewhere else.'),
+        h('input', { type: 'url', id: 'ollama-url', value: s.ollamaUrl, spellcheck: 'false', 'aria-describedby': 'ollama-url-hint', onchange: (e) => save({ ollamaUrl: e.target.value.trim() || 'http://localhost:11434' }, 'Address saved') })),
+      h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', onclick: test }, 'Test connection')),
+      h('p', { id: 'key-status', class: 'status-line', role: 'status' }, 'Not tested yet.')];
+  }
+
   root.replaceChildren(
     h('h1', { id: 'settings-heading', tabindex: '-1' }, 'Settings'),
     h('section', { class: 'panel', 'aria-labelledby': 'ai-h' },
-      h('h2', { id: 'ai-h' }, 'Claude suggestions (optional)'),
-      h('p', null, 'Claude can suggest alt text, link text and slide titles for you to review. This is the only feature that uses the internet; when you ask for a suggestion, the image and nearby text are sent to Anthropic. Everything else works offline.'),
-      h('div', { class: 'form-grid' },
-        h('div', { class: 'check' }, h('input', { type: 'checkbox', id: 'ai-enabled', checked: s.aiEnabled, onchange: async (e) => { state.settings = await api.setSettings({ aiEnabled: e.target.checked }); announce(e.target.checked ? 'Claude suggestions turned on' : 'Claude suggestions turned off'); } }), h('label', { for: 'ai-enabled' }, 'Allow Claude suggestions')),
-        h('div', { class: 'field' },
-          h('label', { for: 'api-key' }, 'Claude API key'),
-          h('span', { class: 'hint', id: 'api-key-hint' }, `Create a key at console.anthropic.com. It is stored ${s.keyStorage === 'encrypted' ? 'encrypted with your system keychain' : 'in your user settings folder (no system keychain was found)'} and only sent to Anthropic.`),
-          h('input', { type: 'password', id: 'api-key', autocomplete: 'off', spellcheck: 'false', placeholder: s.hasApiKey ? '•••••••• (saved, type to replace)' : 'sk-ant-…', 'aria-describedby': 'api-key-hint key-status' })),
-        h('div', { class: 'btn-row' },
-          h('button', { type: 'button', class: 'btn btn-primary', onclick: async () => { const v = document.getElementById('api-key').value; if (!v.trim()) { toast('Type a key first.', true); return; } state.settings = await api.setApiKey(v); document.getElementById('api-key').value = ''; renderSettings(); toast('API key saved.'); } }, 'Save key'),
-          h('button', { type: 'button', class: 'btn', onclick: async () => { const el = document.getElementById('key-status'); el.className = 'status-line'; el.textContent = 'Testing…'; const r = await api.testApiKey(document.getElementById('api-key').value).catch((e) => ({ ok: false, message: e.message })); el.className = 'status-line ' + (r.ok ? 'ok' : 'bad'); el.textContent = r.ok ? `Connected. Using ${r.model}.` : r.message; } }, 'Test connection'),
-          s.hasApiKey ? h('button', { type: 'button', class: 'btn btn-quiet', onclick: async () => { state.settings = await api.setApiKey(''); renderSettings(); toast('API key removed.'); } }, 'Remove key') : null),
-        keyStatus,
-        h('div', { class: 'field' },
-          h('label', { for: 'model' }, 'Claude model'),
-          h('select', { id: 'model', onchange: async (e) => { state.settings = await api.setSettings({ model: e.target.value }); announce('Model saved'); } },
-            [['claude-opus-5-5', 'Claude Opus 5.5 (best quality, default)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 (faster, lower cost)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (fastest, lowest cost)']].map(([v, l]) => h('option', { value: v, selected: s.model === v }, l)))))),
+      h('h2', { id: 'ai-h' }, 'Suggestions for alt text, link text and slide titles'),
+      h('p', null, 'Without any AI, the app already suggests text from captions, chart data, web addresses and slide text. To describe pictures that have no caption, choose a model below. You review every suggestion.'),
+      h('fieldset', { class: 'form-grid' },
+        h('legend', null, 'Who writes picture descriptions'),
+        radio('ollama', 'A model on this computer (Ollama)', 'Free and fully offline. Nothing leaves your computer. Needs a one-off download.'),
+        radio('anthropic', 'Claude, with an API key', 'Best quality. Uses the internet and is billed to your Anthropic account.'),
+        radio('openai', 'OpenAI, with an API key', 'Uses the internet and is billed to your OpenAI account.'),
+        radio('off', 'No AI', 'Only offline suggestions. Pictures without a caption need you to type the alt text.')),
+      h('div', { class: 'form-grid' }, ...details),
+      h('details', { class: 'note' },
+        h('summary', null, 'Why can’t I sign in with my Claude or ChatGPT subscription?'),
+        h('p', null, 'Anthropic’s terms do not allow other apps to use a Claude Pro or Max subscription; apps must use an API key. OpenAI’s “Sign in with ChatGPT” for using a Plus or Pro plan in other apps is currently open only to partners OpenAI approves. If that opens up, it can be added here.'))),
     h('section', { class: 'panel', 'aria-labelledby': 'doc-h' },
       h('h2', { id: 'doc-h' }, 'Documents'),
       h('div', { class: 'form-grid' },
@@ -377,7 +449,7 @@ function renderHelp() {
       h('h2', { id: 'h-tiers' }, 'Three kinds of fix'),
       h('ul', { class: 'help-list' },
         h('li', null, h('strong', null, 'Automatic: '), 'the app can fix it safely without your input, for example document title and language, table header rows, heading levels, colour contrast, typed bullet lists, PDF tab order and bookmarks.'),
-        h('li', null, h('strong', null, 'Needs your text: '), 'alt text, link text and slide titles need words that fit the meaning. Claude can suggest them, but nothing is applied until you approve it.'),
+        h('li', null, h('strong', null, 'Needs your text: '), 'alt text, link text and slide titles need words that fit the meaning. The app suggests them offline where it can (from captions, chart data, web addresses and slide text), and an AI model you choose can suggest the rest. You review every suggestion.'),
         h('li', null, h('strong', null, 'Manual / human checks: '), 'some criteria can only be judged by a person, such as reading order, whether colour alone carries meaning, and whether alt text is accurate.'))),
     h('section', { class: 'panel', 'aria-labelledby': 'h-what' },
       h('h2', { id: 'h-what' }, 'What is checked'),
@@ -439,11 +511,11 @@ function nextFocusAfter(doc, issue) {
 }
 async function applyFix(doc, issue) {
   const d = draft(doc.id, issue.id) || {};
-  const input = { decorative: !!d.decorative, fromAI: !!d.fromAI };
+  const input = { decorative: !!d.decorative, fromAI: d.fromAI ? (typeof d.fromAI === 'string' ? d.fromAI : aiName()) : false, fromOffline: d.value === undefined && !!issue.fix.suggestionSource };
   if (issue.fix.inputType === 'level') input.value = d.value || issue.fix.suggestion;
   else if (issue.fix.kind !== 'auto' || issue.fix.editable) input.value = d.value !== undefined ? d.value : issue.fix.suggestion || '';
   if ((issue.fix.kind === 'ai' || issue.fix.kind === 'input') && !input.decorative && !String(input.value || '').trim()) {
-    setError(doc, issue, 'Enter the text first' + (issue.fix.kind === 'ai' ? ', or ask Claude for a suggestion.' : '.'));
+    setError(doc, issue, 'Enter the text first' + (issue.fix.kind === 'ai' && aiOn() ? `, or ask ${aiName()} for a suggestion.` : '.'));
     state.pendingFocus = `in-${issue.id}`;
     render();
     return;
@@ -467,22 +539,24 @@ async function applyFix(doc, issue) {
     toast(e.message, true);
   }
 }
-async function fixAll(doc) {
+async function fixAll(doc, includeSuggestions = false) {
   try {
-    const r = await busy('Applying automatic fixes', () => api.fixAll(doc.id));
+    const label = includeSuggestions ? 'Applying automatic fixes and suggested text' : 'Applying automatic fixes';
+    const r = await busy(label, () => api.fixAll(doc.id, { includeSuggestions, useAI: includeSuggestions && aiOn() }));
     replaceDoc(r.doc);
-    state.pendingFocus = 'doc-h1';
+    state.pendingFocus = r.suggested ? 'review-h' : 'doc-h1';
     render();
     const left = r.doc.result.summary;
-    toast(`${r.applied} automatic fix${r.applied === 1 ? '' : 'es'} applied.${r.errors.length ? ` ${r.errors.length} could not be applied.` : ''} ${left.total} issue${left.total === 1 ? '' : 's'} left to review. Remember to save the accessible copy.`, r.errors.length > 0);
+    const auto = r.applied - (r.suggested || 0);
+    toast(`${auto} automatic fix${auto === 1 ? '' : 'es'} applied.${r.suggested ? ` ${r.suggested} item${r.suggested === 1 ? '' : 's'} filled in from suggested text: please review them.` : ''}${r.errors.length ? ` ${r.errors.length} could not be done (${r.errors[0].message})` : ''} ${left.total} issue${left.total === 1 ? '' : 's'} left. Remember to save the accessible copy.`, r.errors.length > 0);
   } catch (e) { toast(e.message, true); }
 }
 async function suggestOne(doc, issue, quiet) {
   try {
-    const r = await (quiet ? api.suggest(doc.id, issue.id) : busy(`Asking Claude about: ${issue.title}`, () => api.suggest(doc.id, issue.id)));
-    setDraft(doc.id, issue.id, { value: r.text, decorative: !!r.decorative, fromAI: true });
+    const r = await (quiet ? api.suggest(doc.id, issue.id) : busy(`Asking ${aiName()} about: ${issue.title}`, () => api.suggest(doc.id, issue.id)));
+    setDraft(doc.id, issue.id, { value: r.text, decorative: !!r.decorative, fromAI: r.provider || aiName() });
     setError(doc, issue, null);
-    if (!quiet) { state.pendingFocus = r.decorative ? `dec-${issue.id}` : `in-${issue.id}`; render(); announce(r.decorative ? 'Claude thinks this image is decorative. Review and apply.' : `Suggestion ready: ${r.text}. Review it, then apply.`); }
+    if (!quiet) { state.pendingFocus = r.decorative ? `dec-${issue.id}` : `in-${issue.id}`; render(); announce(r.decorative ? `${r.provider || aiName()} thinks this image is decorative. Review and apply.` : `Suggestion ready: ${r.text}. Review it, then apply.`); }
     return true;
   } catch (e) {
     setError(doc, issue, e.message);
@@ -494,7 +568,7 @@ async function suggestAll(doc) {
   const list = doc.result.issues.filter((i) => i.fix.kind === 'ai' && !(draft(doc.id, i.id) || {}).fromAI);
   if (!list.length) { toast('Every item already has a suggestion to review.'); return; }
   let ok = 0;
-  await busy(`Asking Claude for ${list.length} suggestion${list.length > 1 ? 's' : ''}`, async () => {
+  await busy(`Asking ${aiName()} for ${list.length} suggestion${list.length > 1 ? 's' : ''}`, async () => {
     for (const i of list) { if (await suggestOne(doc, i, true)) ok++; }
   });
   state.filter = 'text';
@@ -549,6 +623,6 @@ api.onMenu((what) => {
   if (what === 'add') addFiles();
   else { state.view = what === 'help' ? 'help' : 'settings'; state.pendingFocus = state.view + '-heading'; render(); }
 });
-api.onProgress((p) => { if (state.busy) { state.busy.label = `Applying automatic fixes (${p.n} done: ${p.title})`; const el = document.querySelector('main [role="status"].muted'); if (el) el.lastChild.textContent = state.busy.label + '…'; } });
+api.onProgress((p) => { if (state.busy) { state.busy.label = /^Getting a suggestion/.test(p.title) ? p.title : `Applying fixes (${p.n} done: ${p.title})`; const el = document.querySelector('main [role="status"].muted'); if (el) el.lastChild.textContent = state.busy.label + '…'; } });
 
-render();
+api.getSettings().then((s) => { state.settings = s; render(); }).catch(() => render());

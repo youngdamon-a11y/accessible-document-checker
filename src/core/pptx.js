@@ -5,6 +5,7 @@ const JSZip = require('jszip');
 const X = require('./xml');
 const C = require('./contrast');
 const { makeIssue, LINK_TEXT_BAD, isUrlText, suggestLinkText } = require('./issues');
+const D = require('./describe');
 const { mimeOf } = require('./docx');
 
 const REL_CORE = 'http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties';
@@ -287,6 +288,11 @@ async function audit(buffer, opts = {}) {
         const rel = rid && slide.relMap[rid];
         const imagePart = rel && !rel.external ? path.normalize(path.join(path.dirname(slide.path), rel.target)) : null;
         const kind = isGraphic ? 'chart or graphic' : 'picture';
+        let chartPart = null;
+        const chartEl = X.first(pic, 'http://schemas.openxmlformats.org/drawingml/2006/chart', 'chart');
+        const crel = chartEl && slide.relMap[X.attr(chartEl, 'r', 'id')];
+        if (crel && !crel.external) chartPart = path.normalize(path.join(path.dirname(slide.path), crel.target));
+        const caption = D.findCaption(shs.filter((o) => o !== shape).flatMap((o) => shapeText(o).split('\n')));
         const media = X.first(pic, 'a', 'videoFile') || X.first(pic, 'a', 'audioFile') || X.all(pic, '*', 'media').length;
         if (media) {
           issues.push(makeIssue({
@@ -302,8 +308,8 @@ async function audit(buffer, opts = {}) {
             title: descr ? `${cap(kind)} alt text looks like a file name` : `${cap(kind)} has no alt text`,
             description: `Describe what this ${kind} shows or means, or mark it as decorative if it adds no information.`,
             location: loc(slide, describeShape(pic)),
-            fix: { kind: imagePart ? 'ai' : 'input', label: 'Add alt text', inputLabel: 'Alt text', allowDecorative: true, multiline: true },
-            target: { slide: slide.number - 1, shapeId: c.getAttribute('id'), imagePart, context: `Slide title: ${st}\n${slideText(slide)}` },
+            fix: { kind: imagePart ? 'ai' : 'input', label: 'Add alt text', inputLabel: 'Alt text', allowDecorative: true, multiline: true, ...(caption ? { suggestion: caption, suggestionSource: 'caption' } : {}) },
+            target: { slide: slide.number - 1, shapeId: c.getAttribute('id'), imagePart, chartPart, context: `Slide title: ${st}\n${slideText(slide)}` },
           }));
         }
       });
@@ -397,6 +403,19 @@ async function audit(buffer, opts = {}) {
         target: { slide: slide.number - 1, fg: g.fg, bg: g.bg, need: g.need, to, swatch: { fg: g.fg, bg: g.bg, to } },
       }));
     }
+  }
+
+  // Charts: describe them from their own data (no AI needed).
+  for (const iss of issues) {
+    const cp = iss.target && iss.target.chartPart;
+    if (!cp || iss.fix.suggestionSource || !ctx.zip.file(cp)) continue;
+    const d = D.describeChart(await ctx.zip.file(cp).async('string'));
+    if (d) { iss.fix.suggestion = d; iss.fix.suggestionSource = 'chart data'; }
+  }
+  for (const iss of issues) {
+    if (iss.rule === 'slide-title' && iss.fix.suggestion) iss.fix.suggestionSource = 'first line of the slide';
+    if (iss.rule === 'link-text' && iss.fix.suggestion) iss.fix.suggestionSource = 'web address';
+    if (iss.rule === 'slide-title-dup') iss.fix.suggestionSource = 'existing title';
   }
 
   return {

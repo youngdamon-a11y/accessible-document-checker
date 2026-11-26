@@ -4,14 +4,39 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const http = require('http');
 const { _electron: electron } = require('playwright');
+
+// A stand-in for Ollama, so the local-model route can be tested without a 3 GB download.
+function fakeOllama() {
+  const seen = { chats: 0, images: 0 };
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/tags') return res.end(JSON.stringify({ models: [{ name: 'gemma3:latest' }] }));
+      if (req.url === '/api/chat') {
+        const j = JSON.parse(body);
+        seen.chats++;
+        const imgs = (j.messages.find((m) => m.images) || {}).images || [];
+        seen.images += imgs.length;
+        return res.end(JSON.stringify({ message: { role: 'assistant', content: imgs.length ? 'Bar chart of students per region in 2026; the fourth region has the most students.' : 'Our results this year' } }));
+      }
+      res.statusCode = 404; res.end('{}');
+    });
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, seen, url: `http://127.0.0.1:${server.address().port}` })));
+}
 
 (async () => {
   const shots = process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'adc-shots-'));
   fs.mkdirSync(shots, { recursive: true });
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'adc-e2e-'));
   for (const f of fs.readdirSync(path.join(__dirname, 'fixtures'))) fs.copyFileSync(path.join(__dirname, 'fixtures', f), path.join(work, f));
-  const app = await electron.launch({ executablePath: require('electron'), args: [path.join(__dirname, '..'), '--no-sandbox'], env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' } });
+  const ollama = await fakeOllama();
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'adc-userdata-'));
+  const app = await electron.launch({ executablePath: require('electron'), args: [path.join(__dirname, '..'), '--no-sandbox'], env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1', ADC_USER_DATA: userData } });
   const page = await app.firstWindow();
   await page.setViewportSize({ width: 1280, height: 900 });
   page.on('console', (m) => { if (m.type() === 'error') console.log('console error:', m.text()); });
@@ -70,13 +95,43 @@ const { _electron: electron } = require('playwright');
   console.log('report pdf exists:', fs.existsSync(reportPath), fs.existsSync(reportPath) ? fs.statSync(reportPath).size : 0);
   if (!fs.existsSync(reportPath)) failures++;
 
-  // PowerPoint
+  // Settings: choose the local model (fake Ollama) and test the connection
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.waitForSelector('#settings-heading');
+  await page.getByLabel(/A model on this computer/).check();
+  await page.waitForSelector('#ollama-url');
+  await page.fill('#ollama-url', ollama.url);
+  await page.press('#ollama-url', 'Tab');
+  await page.waitForTimeout(200);
+  await page.getByRole('button', { name: 'Test connection' }).click();
+  await page.waitForFunction(() => /Connected|not|Could/.test(document.getElementById('key-status').textContent));
+  const conn = await page.textContent('#key-status');
+  console.log('ollama test:', conn);
+  if (!/Connected/.test(conn)) { failures++; console.log('FAIL: local model connection'); }
+  await page.screenshot({ path: path.join(shots, '6-settings.png') });
+  failures += await runAxe('settings (local model)');
+
+  // PowerPoint: Fix all, including suggested text (chart data, slide text, link address, local model)
+  await page.getByRole('button', { name: 'Dashboard' }).click();
   await page.getByRole('button', { name: /sample-inaccessible\.pptx/ }).first().click();
   await page.waitForSelector('#doc-h1');
-  await page.getByRole('button', { name: /Fix all automatic/ }).click();
+  await page.getByRole('button', { name: /Fix all, including suggested text/ }).click();
   await page.waitForFunction(() => !document.querySelector('.spinner'));
+  await page.waitForSelector('#review-h');
+  const reviewed = await page.$$eval('.review-list li', (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ')));
+  console.log('pptx suggested items:', reviewed.length); reviewed.forEach((r) => console.log('  -', r.slice(0, 160)));
+  console.log('fake ollama calls:', ollama.seen);
+  if (!ollama.seen.images) { failures++; console.log('FAIL: local model was not sent an image'); }
+  const pv = (await page.textContent('.verdict')).replace(/\s+/g, ' ');
+  console.log('pptx verdict:', pv);
+  if (!/Passes the automated checks/.test(pv)) { failures++; console.log('FAIL: pptx should pass automated checks after Fix all with suggestions'); }
   await page.screenshot({ path: path.join(shots, '4-pptx.png') });
   failures += await runAxe('pptx');
+
+  // PDF page rendering for local models
+  const png = await app.evaluate(async (_e, b64) => (await global.__adcRenderPdf(Buffer.from(b64, 'base64'))).subarray(0, 8).toString('hex'), fs.readFileSync(path.join(work, 'sample-untagged.pdf')).toString('base64'));
+  console.log('pdf page render header:', png);
+  if (png !== '89504e470d0a1a0a') { failures++; console.log('FAIL: PDF page did not render to PNG'); }
 
   // PDF
   await page.getByRole('button', { name: /sample-untagged\.pdf/ }).first().click();
@@ -89,8 +144,10 @@ const { _electron: electron } = require('playwright');
   // Settings and help views
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.waitForSelector('#settings-heading');
-  await page.screenshot({ path: path.join(shots, '6-settings.png') });
-  failures += await runAxe('settings');
+  await page.getByLabel(/Claude, with an API key/).check();
+  await page.waitForSelector('#api-key');
+  await page.screenshot({ path: path.join(shots, '6b-settings-claude.png') });
+  failures += await runAxe('settings (Claude)');
   await page.getByRole('button', { name: 'About the checks' }).click();
   await page.waitForSelector('#help-heading');
   failures += await runAxe('help');
@@ -102,6 +159,7 @@ const { _electron: electron } = require('playwright');
   }
   console.log('files in work dir:', fs.readdirSync(work).join(', '));
   await app.close();
+  ollama.server.close();
   console.log(failures ? `E2E finished with ${failures} problem(s)` : 'E2E passed');
   console.log('screenshots:', shots);
   process.exit(failures ? 1 : 0);

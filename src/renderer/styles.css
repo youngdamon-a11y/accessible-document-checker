@@ -161,7 +161,7 @@ mark { background: #FFE45C; color: #1A1A2E; padding: 0 .15em; border-radius: 2px
 .field { display: grid; gap: .3rem; }
 .field label, .label { font-weight: 600; }
 .field .hint { font-size: .9rem; color: var(--muted); }
-input[type="text"], input[type="password"], textarea, select { font: inherit; color: var(--text); background: var(--surface); border: 2px solid var(--border); border-radius: 6px; padding: .5rem .65rem; width: 100%; max-width: 40rem; }
+input[type="text"], input[type="password"], input[type="url"], textarea, select { font: inherit; color: var(--text); background: var(--surface); border: 2px solid var(--border); border-radius: 6px; padding: .5rem .65rem; width: 100%; max-width: 40rem; }
 textarea { min-height: 4.5rem; resize: vertical; }
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
 .check { display: flex; gap: .5rem; align-items: center; }
@@ -206,3 +206,18 @@ table.simple thead th { background: var(--info-bg); color: var(--text); }
 .toolbar select { width: auto; min-height: 2.75rem; }
 .tiles { grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); }
 h1[tabindex="-1"]:focus, h2[tabindex="-1"]:focus { outline: none; }
+
+/* Suggestion provider choice and review list */
+fieldset.form-grid { border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 1rem 1.25rem; margin: 0 0 1.25rem; }
+fieldset.form-grid legend { font-weight: 700; padding: 0 .35rem; }
+.check.radio { align-items: flex-start; }
+.check.radio input { margin-top: .2rem; flex: none; }
+.check.radio label { font-weight: 600; display: flex; flex-direction: column; }
+.check.radio .hint { font-weight: 400; }
+.note { background: var(--info-bg); border-radius: var(--radius); padding: .75rem 1rem; margin-top: 1rem; }
+.note p { margin: .35rem 0; }
+.note summary { cursor: pointer; font-weight: 600; }
+.note code { font-family: Consolas, Menlo, monospace; background: var(--surface); padding: .1rem .35rem; border-radius: 4px; }
+.review-panel { border-left: 6px solid var(--warn); }
+.review-list { padding-left: 1.25rem; }
+.review-list li { margin-bottom: .6rem; }

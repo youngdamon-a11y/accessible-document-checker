@@ -25,7 +25,8 @@ function buildReport(d) {
   const issueRows = (list) => list.map((i) => `<tr><td>${esc(i.title)}${i.description ? `<br><span class="muted">${esc(i.description)}</span>` : ''}</td><td>${crit(i)}</td><td>${esc(i.location.label)}</td><td>${{ auto: 'Automatic', ai: 'Needs text (AI can suggest)', input: 'Needs your input', manual: 'Fix in source / manually' }[i.fix.kind]}</td></tr>`).join('');
   const table = (caption, list) => list.length ? `<table><caption>${esc(caption)}</caption><thead><tr><th scope="col">Issue</th><th scope="col">Criteria</th><th scope="col">Location</th><th scope="col">Fix type</th></tr></thead><tbody>${issueRows(list)}</tbody></table>` : `<p>None.</p>`;
 
-  const appliedRows = (d.applied || []).map((a) => `<li>${esc(a.title)}${a.detail ? ` — ${esc(a.detail)}` : ''}${a.by ? ` <span class="muted">(${esc(a.by)})</span>` : ''}</li>`).join('');
+  const appliedRows = (d.applied || []).map((a) => `<li>${a.suggested ? '<strong>Review:</strong> ' : ''}${esc(a.title)}${a.detail ? ` — ${esc(a.detail)}` : ''}${a.by ? ` <span class="muted">(${esc(a.by)})</span>` : ''}</li>`).join('');
+  const suggestedCount = (d.applied || []).filter((a) => a.suggested).length;
   const hcRows = humanList.map((h) => {
     const st = hcState[h.id] || {};
     const label = st.status === 'confirmed' ? 'Confirmed' : st.status === 'not-applicable' ? 'Not applicable' : 'Not yet checked';
@@ -84,6 +85,7 @@ function buildReport(d) {
   <h2>Remaining warnings</h2>
   ${table('Warnings to review', warnings)}
   <h2>Fixes applied</h2>
+  ${suggestedCount ? `<p>${suggestedCount} item${suggestedCount > 1 ? 's were' : ' was'} filled in from suggested text (captions, chart data, web addresses or an AI model) and should be checked by a person. They are marked “Review”.</p>` : ''}
   ${appliedRows ? `<ol>${appliedRows}</ol>` : '<p>No fixes applied.</p>'}
   <h2>Human checks</h2>
   <p>Automated tools cannot judge every WCAG criterion. These need a person to confirm.</p>

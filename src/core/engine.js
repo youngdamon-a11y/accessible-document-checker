@@ -43,17 +43,44 @@ async function applyFix(buffer, fileName, issue, input = {}, opts = {}) {
   return HANDLERS[format].fix(buffer, issue, input, opts);
 }
 
-/** Apply every automatic fix, re-checking after each so locations stay correct. */
-async function fixAllAuto(buffer, fileName, opts = {}, onProgress) {
+/** Issues that "Fix all" can apply with suggested text (offline or AI) when asked to. */
+function suggestible(issue, extra) {
+  if (!['ai', 'input'].includes(issue.fix.kind) || issue.fix.inFixAll === false) return false;
+  const x = extra && extra[issue.id];
+  if (x && (x.decorative || (x.text || '').trim())) return true;
+  return !!(issue.fix.suggestion || '').trim() && issue.fix.inputType !== 'level';
+}
+
+/**
+ * Apply every automatic fix, re-checking after each so locations stay correct.
+ * With { includeSuggestions: true } it also applies suggested text (captions, chart data,
+ * link addresses, first slide line, and any AI suggestions passed in `suggestions` by issue id).
+ * Those are recorded with `suggested: true` so a person can review them.
+ */
+async function fixAllAuto(buffer, fileName, opts = {}, onProgress, mode = {}) {
   let buf = buffer;
   const applied = [], failed = new Set(), errors = [];
-  for (let guard = 0; guard < 200; guard++) {
+  const extra = mode.suggestions || {};
+  const pick = (res) => res.issues.find((i) => i.fix.kind === 'auto' && i.fix.inFixAll !== false && !failed.has(i.id))
+    || (mode.includeSuggestions ? res.issues.find((i) => !failed.has(i.id) && suggestible(i, extra)) : null);
+  for (let guard = 0; guard < 300; guard++) {
     const res = await audit(buf, fileName, opts);
-    const next = res.issues.find((i) => i.fix.kind === 'auto' && i.fix.inFixAll !== false && !failed.has(i.id));
+    const next = pick(res);
     if (!next) return { buffer: buf, applied, errors, result: res };
+    const isSuggestion = next.fix.kind !== 'auto';
+    const x = extra[next.id];
+    const input = !isSuggestion ? {} : x && x.decorative ? { decorative: true } : { value: ((x && x.text) || next.fix.suggestion).trim() };
     try {
-      buf = await applyFix(buf, fileName, next, {}, opts);
-      applied.push({ id: next.id, title: next.title });
+      buf = await applyFix(buf, fileName, next, input, opts);
+      if (isSuggestion) failed.add(next.id); // apply suggested text to an item once per run
+      const item = { id: next.id, title: next.title };
+      if (isSuggestion) {
+        item.suggested = true;
+        item.source = x ? x.source || 'AI suggestion' : next.fix.suggestionSource || 'suggested text';
+        item.detail = input.decorative ? 'Marked as decorative' : `“${input.value}”`;
+        item.location = next.location && next.location.label;
+      }
+      applied.push(item);
       if (onProgress) onProgress(applied.length, next);
     } catch (e) {
       failed.add(next.id);
@@ -76,4 +103,4 @@ function fixedName(fileName) {
   return `${base} (accessible)${ext}`;
 }
 
-module.exports = { SUPPORTED, detectFormat, audit, applyFix, fixAllAuto, getImage, fixedName, summarise };
+module.exports = { SUPPORTED, detectFormat, audit, applyFix, fixAllAuto, suggestible, getImage, fixedName, summarise };

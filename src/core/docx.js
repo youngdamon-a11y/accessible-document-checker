@@ -4,6 +4,7 @@ const JSZip = require('jszip');
 const X = require('./xml');
 const C = require('./contrast');
 const { makeIssue, LINK_TEXT_BAD, isUrlText, suggestLinkText } = require('./issues');
+const D = require('./describe');
 
 const REL_NUMBERING = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering';
 const REL_CORE = 'http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties';
@@ -312,6 +313,17 @@ async function audit(buffer, opts = {}) {
     let p = container; while (p && !(p.namespaceURI === X.NS.w && p.localName === 'p')) p = p.parentNode;
     const loc = p ? locate(ctx, paras, hctx, p, `${kind} “${dp.getAttribute('name') || 'unnamed'}”`) : { label: kind };
     const ctxText = p ? contextAround(paras, p) : '';
+    // Offline suggestion: a caption next to the image, or the chart's own data.
+    let chartPart = null;
+    const chartEl = gd && X.first(gd, 'http://schemas.openxmlformats.org/drawingml/2006/chart', 'chart');
+    if (chartEl) {
+      const crel = relTarget(ctx, X.attr(chartEl, 'r', 'id'));
+      if (crel && !crel.external) chartPart = 'word/' + crel.target.replace(/^\/?word\//, '').replace(/^\.\//, '');
+    }
+    const pi = p ? paras.indexOf(p) : -1;
+    const own = p ? paraText(p).trim() : '';
+    const caption = pi < 0 ? '' : D.findCaption([own, pi + 1 < paras.length ? paraText(paras[pi + 1]) : '', pi > 0 ? paraText(paras[pi - 1]) : '']);
+    const offline = caption ? { suggestion: caption, suggestionSource: 'caption' } : {};
     const looksLikeFileName = /\.(png|jpe?g|gif|bmp|tiff?|emf|wmf|svg)$/i.test(descr) || /^(picture|image|img|graphic|chart)[\s_-]*\d*$/i.test(descr) || /^IMG_\d+/i.test(descr);
     if (decorative) return;
     if (!descr && !titleAttr) {
@@ -320,8 +332,8 @@ async function audit(buffer, opts = {}) {
         title: `${cap(kind)} has no alt text`,
         description: `Add a short description of what this ${kind} shows or means, or mark it as decorative if it adds no information.`,
         location: loc,
-        fix: { kind: imagePart ? 'ai' : 'input', label: 'Add alt text', inputLabel: 'Alt text', allowDecorative: true, multiline: true },
-        target: { docPrIndex: i, imagePart, context: ctxText },
+        fix: { kind: imagePart ? 'ai' : 'input', label: 'Add alt text', inputLabel: 'Alt text', allowDecorative: true, multiline: true, ...offline },
+        target: { docPrIndex: i, imagePart, chartPart, context: ctxText },
       }));
     } else if (looksLikeFileName) {
       issues.push(makeIssue({
@@ -329,8 +341,8 @@ async function audit(buffer, opts = {}) {
         title: `${cap(kind)} alt text looks like a file name`,
         description: `The alt text “${descr}” does not describe the ${kind}.`,
         location: loc,
-        fix: { kind: imagePart ? 'ai' : 'input', label: 'Replace alt text', inputLabel: 'Alt text', allowDecorative: true, multiline: true, suggestion: '' },
-        target: { docPrIndex: i, imagePart, context: ctxText },
+        fix: { kind: imagePart ? 'ai' : 'input', label: 'Replace alt text', inputLabel: 'Alt text', allowDecorative: true, multiline: true, suggestion: '', ...offline },
+        target: { docPrIndex: i, imagePart, chartPart, context: ctxText },
       }));
     }
   });
@@ -543,6 +555,15 @@ async function audit(buffer, opts = {}) {
       fix: { kind: 'manual' },
     }));
   }
+
+  // Charts: describe them from their own data (no AI needed).
+  for (const iss of issues) {
+    const cp = iss.target && iss.target.chartPart;
+    if (!cp || iss.fix.suggestionSource || !ctx.zip.file(cp)) continue;
+    const d = D.describeChart(await ctx.zip.file(cp).async('string'));
+    if (d) { iss.fix.suggestion = d; iss.fix.suggestionSource = 'chart data'; }
+  }
+  for (const iss of issues) if (iss.rule === 'link-text' && iss.fix.suggestion) iss.fix.suggestionSource = 'web address';
 
   return {
     format: 'docx',

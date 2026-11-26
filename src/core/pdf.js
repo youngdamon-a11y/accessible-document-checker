@@ -243,15 +243,20 @@ async function audit(buffer, opts = {}) {
       }));
     }
     // Figures (1.1.1)
+    const figsPerPage = {};
     struct.filter((r) => r.type === 'Figure').forEach((r, i) => {
       const alt = str(r.el.lookup(N('Alt'))) || str(r.el.lookup(N('ActualText')));
-      if (alt.trim()) return;
       const pg = pageOf(r.pg);
+      const nth = figsPerPage[pg] = (figsPerPage[pg] || 0) + 1;
+      if (alt.trim()) return;
+      // Offline suggestion: the matching "Figure 1: ..." caption on the page.
+      const caps = pg ? [...text[pg - 1].text.matchAll(/(?:^|[\s.])(?:Figure|Fig\.|Chart|Graph|Image|Photo|Diagram|Map)\s*\d+\s*[:.\-–—]\s*([^\n]{3,200}?)(?=\s*(?:$|\n|(?:Figure|Fig\.|Chart|Graph|Image|Photo|Diagram|Map)\s*\d+\s*[:.\-–—])|\.\s)/g)].map((m) => m[1].trim()) : [];
+      const caption = caps[nth - 1] || '';
       issues.push(makeIssue({
         id: `pdf-fig-${i}`, rule: 'img-alt', wcag: ['1.1.1'], pdfua: '7.3',
         title: 'Figure has no alt text', description: 'Add a short description of what this figure shows or means. If it is purely decorative, it should be an artifact instead (fix that in the source or in Acrobat).',
         location: { label: pg ? `Page ${pg} · figure ${i + 1}` : `Figure ${i + 1}`, page: pg, excerpt: pg ? short(text[pg - 1].text, 200) : '' },
-        fix: { kind: pg ? 'ai' : 'input', label: 'Add alt text', inputLabel: 'Alt text', multiline: true },
+        fix: { kind: pg ? 'ai' : 'input', label: 'Add alt text', inputLabel: 'Alt text', multiline: true, ...(caption ? { suggestion: caption, suggestionSource: 'caption' } : {}) },
         target: { figure: i, page: pg ? pg - 1 : null, context: pg ? short(text[pg - 1].text, 800) : '' },
       }));
     });
