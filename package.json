@@ -1,0 +1,95 @@
+{
+  "name": "accessible-document-checker",
+  "productName": "Accessible Document Checker",
+  "version": "0.1.0",
+  "description": "Offline desktop app that checks and fixes Word, PowerPoint and PDF documents against WCAG 2.1 AA and PDF/UA.",
+  "main": "src/main/main.js",
+  "author": "Damon",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/core.test.js",
+    "fixtures": "python3 test/make_fixtures.py",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux",
+    "test:e2e": "node test/e2e.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
+    "@xmldom/xmldom": "0.9.8",
+    "jszip": "3.10.1",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "6.5.438"
+  },
+  "devDependencies": {
+    "axe-core": "4.14.0",
+    "electron": "45.2.3",
+    "electron-builder": "26.18.1"
+  },
+  "build": {
+    "appId": "org.example.accessibledocchecker",
+    "productName": "Accessible Document Checker",
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!node_modules/@napi-rs/**",
+      "!node_modules/pdfjs-dist/build/**",
+      "!node_modules/pdfjs-dist/web/**",
+      "!node_modules/pdfjs-dist/image_decoders/**",
+      "!node_modules/pdfjs-dist/types/**",
+      "!**/*.map"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "identity": null
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office"
+    }
+  }
+}
